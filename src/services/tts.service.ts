@@ -1,10 +1,20 @@
 interface TtsResult {
-  audioBase64: string;
+  audioUrl: string;
 }
 
 import logger from '../lib/logger.js';
 
 const TTS_TIMEOUT_MS = 30_000;
+
+function buildPublicAudioUrl(audioPath?: string, fallbackAudioUrl?: string): string {
+  const appUrl = process.env.APP_URL?.trim();
+  if (appUrl && audioPath) {
+    const normalizedPath = audioPath.startsWith('/') ? audioPath : `/${audioPath}`;
+    return new URL(normalizedPath, appUrl.endsWith('/') ? appUrl : `${appUrl}/`).toString();
+  }
+
+  return fallbackAudioUrl ?? '';
+}
 
 export async function synthesizeSpeech(text: string): Promise<TtsResult> {
   const ttsUrl = `${process.env.TTS_SERVICE_URL ?? 'http://127.0.0.1:8000'}/synthesize`;
@@ -25,12 +35,18 @@ export async function synthesizeSpeech(text: string): Promise<TtsResult> {
     }
 
     const data = (await response.json()) as {
-      audio_base64?: string;
-      audio?: string;
+      audio_url?: string;
+      audio_path?: string;
     };
-    const audioBase64 = data.audio_base64 ?? data.audio ?? '';
+    const audioUrl = buildPublicAudioUrl(data.audio_path, data.audio_url);
 
-    return {audioBase64};
+    if (!audioUrl) {
+      throw new Error('TTS service response did not include audio_url');
+    }
+
+    return {
+      audioUrl,
+    };
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error(`TTS request timed out after ${TTS_TIMEOUT_MS}ms`);

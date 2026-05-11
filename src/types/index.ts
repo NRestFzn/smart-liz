@@ -1,6 +1,6 @@
-import { z } from "zod";
+import {z} from 'zod';
 
-export const EmotionSchema = z.enum(["HAPPY", "ANGRY", "SAD", "EXCITED"]);
+export const EmotionSchema = z.enum(['HAPPY', 'ANGRY', 'SAD', 'EXCITED']);
 
 export const LlmResponseSchema = z.object({
   reply: z.string().min(1),
@@ -13,11 +13,11 @@ export const ChatRequestSchema = z.object({
 
 export const ChatResponseSchema = z.object({
   text: z.string(),
-  audio_payload: z.string(),
   metadata: z.object({
     emotion: EmotionSchema,
     context_used: z.boolean(),
   }),
+  audio_url: z.string().url(),
 });
 
 export type Emotion = z.infer<typeof EmotionSchema>;
