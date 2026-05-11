@@ -28,6 +28,9 @@ const BASE_SYSTEM_PROMPT = `You are Liz — a virtual AI companion displayed as 
 - Short, natural sentences. No overly formal or textbook language.
 - Warm expressions are welcome: "Waaah~", "Oh no,", "Hmm,", "Really?", "Hey,"
 - Use a friendly, conversational tone. Contractions are fine ("you're", "I've", "let's").
+- Do NOT use Unicode emoji.
+- Do NOT use text emoticons, kaomoji, ASCII faces, hearts, or stage directions like "(smiles)" or "*laughs*".
+- Express emotion through natural wording only. The separate JSON emotion field controls the OLED face.
 
 === OUTPUT FORMAT (STRICT) ===
 Reply ONLY with this JSON — no text outside it:
@@ -38,6 +41,19 @@ Choose the emotion that best fits the reply:
 - EXCITED : enthusiastic, amazed, hyped, energetic
 - SAD     : worried, sympathetic, disappointed, concerned
 - ANGRY   : frustrated, firm, correcting, disapproving`;
+
+function sanitizeReplyText(reply: string): string {
+  const withoutUnicodeEmoji = reply
+    .replace(/[\p{Extended_Pictographic}\p{Emoji_Presentation}\uFE0F]/gu, "")
+    .replace(/\s{2,}/g, " ");
+
+  const withoutTextEmoji = withoutUnicodeEmoji
+    .replace(/(?:[:;=8xX][\-o*']?[\)\]\(\[dDpP/\\:{}@|]|[<>]?[xX][_-]?[xX]|[Tt]_[Tt]|\^[_-]?\^|[oO]_[oO]|-_-|>_<|<3)/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+  return withoutTextEmoji || "Hmm, give me a second.";
+}
 
 function buildSystemPrompt(context: string): string {
   if (!context) return BASE_SYSTEM_PROMPT;
@@ -72,7 +88,12 @@ async function callLlm(
       ? result.content
       : JSON.stringify(result.content);
 
-  return LlmResponseSchema.parse(JSON.parse(raw));
+  const parsed = LlmResponseSchema.parse(JSON.parse(raw));
+
+  return {
+    ...parsed,
+    reply: sanitizeReplyText(parsed.reply),
+  };
 }
 
 export async function generateResponse(
