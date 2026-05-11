@@ -18,6 +18,12 @@ export const ChatResponseSchema = z.object({
     context_used: z.boolean(),
   }),
   audio_url: z.string().url(),
+  timing_ms: z.object({
+    rag: z.number(),
+    llm: z.number(),
+    tts: z.number(),
+    total: z.number(),
+  }),
 });
 
 export type Emotion = z.infer<typeof EmotionSchema>;
