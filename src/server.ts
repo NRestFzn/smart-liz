@@ -1,15 +1,19 @@
 import "dotenv/config";
+import http from "node:http";
 import express from "express";
 import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
+import { WebSocketServer } from "ws";
 import chatRoutes from "./routes/chat.routes.js";
 import { errorHandler } from "./middleware/errorHandler.js";
+import { handleWsConnection } from "./controllers/wsChat.controller.js";
 import logger from "./lib/logger.js";
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 3000);
 const TTS_SERVICE_URL = (process.env.TTS_SERVICE_URL ?? "http://127.0.0.1:8000").replace(/\/+$/, "");
+const WS_PATH = process.env.WS_PATH ?? "/ws";
 
 app.use(helmet());
 app.use(cors());
@@ -63,6 +67,18 @@ app.use("/api/v1", chatRoutes);
 
 app.use(errorHandler);
 
-app.listen(PORT, () => {
-  logger.info({ port: PORT }, "Server started");
+const httpServer = http.createServer(app);
+const wss = new WebSocketServer({ server: httpServer, path: WS_PATH });
+
+wss.on("connection", (socket, req) => {
+  logger.info({ remote: req.socket.remoteAddress, path: WS_PATH }, "WS client connected");
+  handleWsConnection(socket);
+
+  socket.on("close", (code, reason) => {
+    logger.info({ code, reason: reason.toString() }, "WS client disconnected");
+  });
+});
+
+httpServer.listen(PORT, () => {
+  logger.info({ port: PORT, ws_path: WS_PATH }, "Server started");
 });

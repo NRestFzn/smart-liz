@@ -1,6 +1,6 @@
 import {z} from 'zod';
 
-export const EmotionSchema = z.enum(['HAPPY', 'ANGRY', 'SAD', 'EXCITED']);
+export const EmotionSchema = z.enum(['HAPPY', 'ANGRY', 'SAD', 'EXCITED', 'SHOCKED']);
 
 export const LlmResponseSchema = z.object({
   reply: z.string().min(1),
@@ -9,6 +9,8 @@ export const LlmResponseSchema = z.object({
 
 export const ChatRequestSchema = z.object({
   message: z.string().min(1).max(2000),
+  session_id: z.string().min(1).max(80).optional(),
+  reset_memory: z.boolean().optional(),
 });
 
 export const ChatResponseSchema = z.object({
@@ -16,6 +18,9 @@ export const ChatResponseSchema = z.object({
   metadata: z.object({
     emotion: EmotionSchema,
     context_used: z.boolean(),
+    memory_used: z.boolean(),
+    memory_turns: z.number(),
+    session_id: z.string(),
   }),
   audio_url: z.string().url(),
   timing_ms: z.object({

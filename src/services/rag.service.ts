@@ -5,7 +5,7 @@ import {Document} from '@langchain/core/documents';
 import {readFileSync} from 'fs';
 import logger from '../lib/logger.js';
 
-const COLLECTION_NAME = 'expressive_face_docs';
+const COLLECTION_NAME = 'expressive_face_docs_v2';
 
 function buildEmbeddings(): OllamaEmbeddings {
   return new OllamaEmbeddings({
