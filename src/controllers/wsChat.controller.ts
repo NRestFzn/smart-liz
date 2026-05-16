@@ -5,6 +5,8 @@ import {streamResponse} from '../services/llm.service.js';
 import {parseStreamingResponse} from '../services/sentenceBuffer.js';
 import {streamSpeech} from '../services/tts.service.js';
 import {getRelevantContext} from '../services/rag.service.js';
+import {createVadStream, type VadStream} from '../services/vad.service.js';
+import {transcribePcm} from '../services/stt.service.js';
 import {
   clearConversation,
   getMemoryContext,
@@ -24,13 +26,30 @@ const WsChatMessageSchema = z.object({
 const WsBargeInSchema = z.object({type: z.literal('barge_in')});
 const WsPingSchema = z.object({type: z.literal('ping')});
 
-const WsIncomingSchema = z.union([WsChatMessageSchema, WsBargeInSchema, WsPingSchema]);
+const WsMicOpenSchema = z.object({
+  type: z.literal('mic_open'),
+  sample_rate: z.number().int().positive().optional(),
+  channels: z.number().int().positive().optional(),
+  format: z.literal('pcm_s16le').optional(),
+});
+const WsMicCloseSchema = z.object({type: z.literal('mic_close')});
+
+const WsIncomingSchema = z.union([
+  WsChatMessageSchema,
+  WsBargeInSchema,
+  WsPingSchema,
+  WsMicOpenSchema,
+  WsMicCloseSchema,
+]);
 
 export type WsIncoming = z.infer<typeof WsIncomingSchema>;
 
 interface SessionState {
   sessionId: string;
   activeStreamAbort: AbortController | null;
+  vad: VadStream | null;
+  micPaused: boolean;       // true while Liz is replying (half-duplex)
+  micSampleRate: number;
 }
 
 const sessionStates = new WeakMap<WebSocket, SessionState>();
@@ -41,6 +60,9 @@ function getSessionState(socket: WebSocket): SessionState {
     state = {
       sessionId: normalizeSessionId(undefined),
       activeStreamAbort: null,
+      vad: null,
+      micPaused: false,
+      micSampleRate: 16_000,
     };
     sessionStates.set(socket, state);
   }
@@ -64,6 +86,7 @@ export function handleWsConnection(socket: WebSocket): void {
 
   socket.on('message', async (raw, isBinary) => {
     if (isBinary) {
+      handleBinaryFrame(socket, raw as Buffer);
       return;
     }
 
@@ -89,6 +112,16 @@ export function handleWsConnection(socket: WebSocket): void {
       return;
     }
 
+    if (parsed.type === 'mic_open') {
+      openMic(socket, parsed.sample_rate);
+      return;
+    }
+
+    if (parsed.type === 'mic_close') {
+      closeMic(socket);
+      return;
+    }
+
     await handleChatMessage(socket, parsed);
   });
 
@@ -107,6 +140,11 @@ async function handleChatMessage(
   state.activeStreamAbort?.abort();
   const abortCtrl = new AbortController();
   state.activeStreamAbort = abortCtrl;
+
+  // Half-duplex: ignore the mic while Liz is replying. Reset the VAD so any
+  // partial utterance buffered before Liz's reply is discarded.
+  state.micPaused = true;
+  state.vad?.reset();
 
   const sessionId = normalizeSessionId(payload.session_id ?? state.sessionId);
   state.sessionId = sessionId;
@@ -194,6 +232,10 @@ async function handleChatMessage(
     if (state.activeStreamAbort === abortCtrl) {
       state.activeStreamAbort = null;
     }
+    // Resume listening — Liz has finished (or the stream aborted).
+    state.vad?.reset();
+    state.micPaused = false;
+    sendJson(socket, {type: 'listening'});
   }
 }
 
@@ -223,6 +265,83 @@ async function streamSentenceToSocket(
     }
     sendBinary(socket, chunk);
   }
+}
+
+// =============================================================================
+// Upstream voice path — INMP441 → backend → STT → handleChatMessage
+// =============================================================================
+
+function openMic(socket: WebSocket, sampleRate?: number): void {
+  const state = getSessionState(socket);
+  const rate = sampleRate ?? 16_000;
+  state.micSampleRate = rate;
+  state.vad = createVadStream({sampleRate: rate});
+  state.micPaused = false;
+  logger.info({sample_rate: rate}, 'WS mic opened');
+  sendJson(socket, {type: 'mic_opened', sample_rate: rate});
+  sendJson(socket, {type: 'listening'});
+}
+
+function closeMic(socket: WebSocket): void {
+  const state = getSessionState(socket);
+  state.vad = null;
+  state.micPaused = false;
+  logger.info({}, 'WS mic closed');
+}
+
+function handleBinaryFrame(socket: WebSocket, data: Buffer): void {
+  const state = getSessionState(socket);
+  if (!state.vad || state.micPaused) {
+    return; // mic not opened, or half-duplex pause while Liz speaks
+  }
+
+  const events = state.vad.push(data);
+  for (const event of events) {
+    if (event.type === 'speech_start') {
+      sendJson(socket, {type: 'user_speech_start'});
+    } else if (event.type === 'speech_end') {
+      sendJson(socket, {type: 'user_speech_end', duration_ms: event.durationMs});
+      void handleVoiceUtterance(socket, event.pcm, event.durationMs);
+    }
+  }
+}
+
+async function handleVoiceUtterance(
+  socket: WebSocket,
+  pcm: Buffer,
+  durationMs: number,
+): Promise<void> {
+  const state = getSessionState(socket);
+
+  let transcript: string;
+  try {
+    const result = await transcribePcm(pcm, {sampleRate: state.micSampleRate});
+    transcript = result.text;
+    logger.info(
+      {duration_ms: durationMs, transcript_chars: transcript.length, stt_language: result.language},
+      'STT transcription complete',
+    );
+  } catch (err) {
+    logger.error({err, pcm_bytes: pcm.length}, 'STT failed');
+    sendJson(socket, {type: 'error', message: 'stt_failed'});
+    sendJson(socket, {type: 'listening'});
+    return;
+  }
+
+  if (!transcript) {
+    // Empty transcript usually means noise — VAD picked something up but
+    // Whisper didn't find words. Resume listening silently.
+    sendJson(socket, {type: 'listening'});
+    return;
+  }
+
+  sendJson(socket, {type: 'transcript_final', text: transcript});
+
+  await handleChatMessage(socket, {
+    type: 'chat',
+    message: transcript,
+    session_id: state.sessionId,
+  });
 }
 
 export {EmotionSchema};
