@@ -31,6 +31,7 @@ const WsMicOpenSchema = z.object({
   sample_rate: z.number().int().positive().optional(),
   channels: z.number().int().positive().optional(),
   format: z.literal('pcm_s16le').optional(),
+  session_id: z.string().max(80).optional(),
 });
 const WsMicCloseSchema = z.object({type: z.literal('mic_close')});
 
@@ -113,7 +114,7 @@ export function handleWsConnection(socket: WebSocket): void {
     }
 
     if (parsed.type === 'mic_open') {
-      openMic(socket, parsed.sample_rate);
+      openMic(socket, parsed.sample_rate, parsed.session_id);
       return;
     }
 
@@ -271,14 +272,22 @@ async function streamSentenceToSocket(
 // Upstream voice path — INMP441 → backend → STT → handleChatMessage
 // =============================================================================
 
-function openMic(socket: WebSocket, sampleRate?: number): void {
+function openMic(socket: WebSocket, sampleRate?: number, sessionId?: string): void {
   const state = getSessionState(socket);
   const rate = sampleRate ?? 16_000;
   state.micSampleRate = rate;
   state.vad = createVadStream({sampleRate: rate});
   state.micPaused = false;
-  logger.info({sample_rate: rate}, 'WS mic opened');
-  sendJson(socket, {type: 'mic_opened', sample_rate: rate});
+
+  // Bind the WS to a stable session id so voice and typed inputs share one
+  // memory ring. If the firmware omits session_id we keep whatever the
+  // session was already on (default normalized id).
+  if (sessionId) {
+    state.sessionId = normalizeSessionId(sessionId);
+  }
+
+  logger.info({sample_rate: rate, session_id: state.sessionId}, 'WS mic opened');
+  sendJson(socket, {type: 'mic_opened', sample_rate: rate, session_id: state.sessionId});
   sendJson(socket, {type: 'listening'});
 }
 
